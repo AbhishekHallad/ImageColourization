@@ -87,27 +87,76 @@ class FusionModel(BaseModel):
         self.fake_B_reg = self.netGF(self.full_real_A, self.full_hint_B, self.full_mask_B, feature_map, self.box_info_list)
         
     def save_current_imgs(self, path):
-        out_img = torch.clamp(util.lab2rgb(torch.cat((self.full_real_A.type(torch.cuda.FloatTensor), self.fake_B_reg.type(torch.cuda.FloatTensor)), dim=1), self.opt), 0.0, 1.0)
-        out_img = np.transpose(out_img.cpu().data.numpy()[0], (1, 2, 0))
-        io.imsave(path, img_as_ubyte(out_img))
+        # Use appropriate tensor type based on device
+        tensor_type = torch.cuda.FloatTensor if torch.cuda.is_available() else torch.FloatTensor
+        
+        # The model produces AB values in range [-1, 1], but mean is often near 0
+        # This means most pixels are grayscale. We need to enhance colors significantly.
+        ab_enhanced = self.fake_B_reg.clone()
+        ab_std = ab_enhanced.std().item()
+        ab_mean = ab_enhanced.mean().item()
+        
+        # Apply aggressive enhancement to make colors more vibrant
+        # Scale all AB values to make weak colors more visible
+        # Use a factor that brings the std closer to a reasonable level (0.1-0.2)
+        if ab_std < 0.15:  # Low color variation - need enhancement
+            # Calculate enhancement factor to boost std to ~0.15-0.2 range
+            target_std = 0.18  # Target standard deviation for good color saturation
+            if ab_std > 0.001:  # Avoid division by zero
+                enhancement_factor = target_std / ab_std
+                # Cap enhancement to avoid artifacts
+                enhancement_factor = min(enhancement_factor, 3.0)
+            else:
+                enhancement_factor = 2.5  # Default for very low std
+            
+            # Apply enhancement
+            ab_enhanced = ab_enhanced * enhancement_factor
+            # Clamp to valid range [-1, 1]
+            ab_enhanced = torch.clamp(ab_enhanced, -1.0, 1.0)
+        
+        # Combine L channel (grayscale) with AB channels (color)
+        lab_img = torch.cat((self.full_real_A.type(tensor_type), ab_enhanced.type(tensor_type)), dim=1)
+        out_img = torch.clamp(util.lab2rgb(lab_img, self.opt), 0.0, 1.0)
+        
+        # Additional post-processing: enhance saturation in RGB space
+        out_img_np = np.transpose(out_img.cpu().data.numpy()[0], (1, 2, 0))
+        
+        # Convert to HSV and boost saturation
+        from skimage import color as skcolor
+        hsv = skcolor.rgb2hsv(out_img_np)
+        # Boost saturation by 1.5x (cap at 1.0)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.5, 0, 1.0)
+        out_img_np = skcolor.hsv2rgb(hsv)
+        out_img_np = np.clip(out_img_np, 0, 1)
+        
+        io.imsave(path, img_as_ubyte(out_img_np))
 
     def setup_to_test(self, fusion_weight_path):
         GF_path = 'checkpoints/{0}/latest_net_GF.pth'.format(fusion_weight_path)
         print('load Fusion model from %s' % GF_path)
-        GF_state_dict = torch.load(GF_path)
+        # Map to CPU if CUDA is not available
+        map_location = 'cpu' if not torch.cuda.is_available() else None
+        GF_state_dict = torch.load(GF_path, map_location=map_location)
         
         # G_path = 'checkpoints/coco_finetuned_mask_256/latest_net_G.pth' # fine tuned on cocostuff
         G_path = 'checkpoints/{0}/latest_net_G.pth'.format(fusion_weight_path)
-        G_state_dict = torch.load(G_path)
+        G_state_dict = torch.load(G_path, map_location=map_location)
 
         # GComp_path = 'checkpoints/siggraph_retrained/latest_net_G.pth' # original net
         # GComp_path = 'checkpoints/coco_finetuned_mask_256/latest_net_GComp.pth' # fine tuned on cocostuff
         GComp_path = 'checkpoints/{0}/latest_net_GComp.pth'.format(fusion_weight_path)
-        GComp_state_dict = torch.load(GComp_path)
+        GComp_state_dict = torch.load(GComp_path, map_location=map_location)
 
         self.netGF.load_state_dict(GF_state_dict, strict=False)
-        self.netG.module.load_state_dict(G_state_dict, strict=False)
-        self.netGComp.module.load_state_dict(GComp_state_dict, strict=False)
+        # Handle both DataParallel and regular models
+        if hasattr(self.netG, 'module'):
+            self.netG.module.load_state_dict(G_state_dict, strict=False)
+        else:
+            self.netG.load_state_dict(G_state_dict, strict=False)
+        if hasattr(self.netGComp, 'module'):
+            self.netGComp.module.load_state_dict(GComp_state_dict, strict=False)
+        else:
+            self.netGComp.load_state_dict(GComp_state_dict, strict=False)
         self.netGF.eval()
         self.netG.eval()
         self.netGComp.eval()

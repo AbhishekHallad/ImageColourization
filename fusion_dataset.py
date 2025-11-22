@@ -27,19 +27,21 @@ class Fusion_Testing_Dataset(Data.Dataset):
         pred_bbox = gen_maskrcnn_bbox_fromPred(pred_info_path, self.box_num)
 
         img_list = []
-        pil_img = read_to_pil(output_image_path)
-        img_list.append(self.transforms(pil_img))
+        # Convert to grayscale for colorization (as per test_fusion.py line 51 comment)
+        rgb_img, gray_img = gen_gray_color_pil(output_image_path)
+        img_list.append(self.transforms(gray_img))
         
         cropped_img_list = []
         index_list = range(len(pred_bbox))
         box_info, box_info_2x, box_info_4x, box_info_8x = np.zeros((4, len(index_list), 6))
         for i in index_list:
             startx, starty, endx, endy = pred_bbox[i]
-            box_info[i] = np.array(get_box_info(pred_bbox[i], pil_img.size, self.final_size))
-            box_info_2x[i] = np.array(get_box_info(pred_bbox[i], pil_img.size, self.final_size // 2))
-            box_info_4x[i] = np.array(get_box_info(pred_bbox[i], pil_img.size, self.final_size // 4))
-            box_info_8x[i] = np.array(get_box_info(pred_bbox[i], pil_img.size, self.final_size // 8))
-            cropped_img = self.transforms(pil_img.crop((startx, starty, endx, endy)))
+            box_info[i] = np.array(get_box_info(pred_bbox[i], rgb_img.size, self.final_size))
+            box_info_2x[i] = np.array(get_box_info(pred_bbox[i], rgb_img.size, self.final_size // 2))
+            box_info_4x[i] = np.array(get_box_info(pred_bbox[i], rgb_img.size, self.final_size // 4))
+            box_info_8x[i] = np.array(get_box_info(pred_bbox[i], rgb_img.size, self.final_size // 8))
+            # Use grayscale cropped image
+            cropped_img = self.transforms(gray_img.crop((startx, starty, endx, endy)))
             cropped_img_list.append(cropped_img)
         output = {}
         output['full_img'] = torch.stack(img_list)

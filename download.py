@@ -15,6 +15,12 @@ def download_file_from_google_drive(id, destination):
     if token:
         params = { 'id' : id, 'confirm' : token }
         response = session.get(URL, params = params, stream = True)
+    
+    # Handle virus scan warning - try direct download link
+    if 'virus' in response.text.lower() or response.headers.get('Content-Type', '').startswith('text/html'):
+        # Use alternative download method
+        download_url = f"https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t"
+        response = session.get(download_url, stream = True)
 
     save_response_content(response, destination)
 
