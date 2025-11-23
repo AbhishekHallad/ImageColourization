@@ -43,26 +43,12 @@ if __name__ == '__main__':
     # model.setup_to_test('coco_finetuned_mask_256')
     model.setup_to_test('coco_finetuned_mask_256_ffs')
 
-    count_empty = 0
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     for data_raw in tqdm(dataset_loader, dynamic_ncols=True):
-        # if os.path.isfile(join(save_img_path, data_raw['file_id'][0] + '.png')) is True:
-        #     continue
+        # Pure colorization: Use ONLY full-image model (netGComp) - NO bounding boxes, NO masks, NO fusion
+        # This colorizes the entire image uniformly without any detector-based restrictions
         data_raw['full_img'][0] = data_raw['full_img'][0].to(device)
-        if data_raw['empty_box'][0] == 0:
-            data_raw['cropped_img'][0] = data_raw['cropped_img'][0].to(device)
-            box_info = data_raw['box_info'][0]
-            box_info_2x = data_raw['box_info_2x'][0]
-            box_info_4x = data_raw['box_info_4x'][0]
-            box_info_8x = data_raw['box_info_8x'][0]
-            cropped_data = util.get_colorization_data(data_raw['cropped_img'], opt, ab_thresh=0, p=opt.sample_p)
-            full_img_data = util.get_colorization_data(data_raw['full_img'], opt, ab_thresh=0, p=opt.sample_p)
-            model.set_input(cropped_data)
-            model.set_fusion_input(full_img_data, [box_info, box_info_2x, box_info_4x, box_info_8x])
-            model.forward()
-        else:
-            count_empty += 1
-            full_img_data = util.get_colorization_data(data_raw['full_img'], opt, ab_thresh=0, p=opt.sample_p)
-            model.set_forward_without_box(full_img_data)
+        full_img_data = util.get_colorization_data(data_raw['full_img'], opt, ab_thresh=0, p=opt.sample_p)
+        model.set_forward_without_box(full_img_data)
         model.save_current_imgs(join(save_img_path, data_raw['file_id'][0] + '.png'))
-    print('{0} images without bounding boxes'.format(count_empty))
+    print('✅ Pure colorization complete - no bounding boxes or masks used')
