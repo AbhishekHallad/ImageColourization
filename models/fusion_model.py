@@ -9,6 +9,7 @@ from . import networks
 import numpy as np
 from skimage import io
 from skimage import img_as_ubyte
+import cv2
 
 import matplotlib.pyplot as plt
 import math
@@ -238,18 +239,31 @@ class FusionModel(BaseModel):
         lab_skin = skcolor.rgb2lab(out_img_np)
         L_lab_skin, a_lab_skin, b_lab_skin = lab_skin[:, :, 0], lab_skin[:, :, 1], lab_skin[:, :, 2]
         
-        # Build skin mask in HSV first (easier to define hue ranges)
-        hsv_skin = skcolor.rgb2hsv(out_img_np)
-        H, S, V = hsv_skin[:, :, 0], hsv_skin[:, :, 1], hsv_skin[:, :, 2]
+        # Build cleaned skin mask using cv2 HSV (more reliable for mask operations)
+        # Convert to uint8 for cv2 operations
+        img_uint8 = (out_img_np * 255).astype(np.uint8)
+        hsv_cv2 = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2HSV).astype(np.float32)
+        H, S, V = hsv_cv2[:, :, 0], hsv_cv2[:, :, 1], hsv_cv2[:, :, 2]
         
-        # Skin hue range: 0-40° (red to yellow-orange) in normalized [0, 1] = 0.0-0.11
-        # EXCLUDE green hues (0.2-0.4) to avoid catching vegetables
-        skin_hue_mask = (H >= 0.0) & (H <= 0.11)  # Only orange-red to yellow range
+        # Original rough skin mask (cv2 HSV: H 0-179, S 0-255, V 0-255)
+        # Tightened V range to exclude dark rocks and bright sky
+        skin_mask = (
+            (H > 0) & (H < 50) &  # typical skin hue range
+            (S > 20) & (S < 200) &  # some saturation, not too high
+            (V > 50) & (V < 240)   # reasonable brightness, exclude very dark/bright
+        )
         
-        # Skin should have moderate saturation (0.1-0.7) and reasonable value (> 0.2)
-        # Exclude very high saturation (> 0.7) which are likely colored objects
-        # Exclude very low saturation (< 0.1) which are grayscale
-        skin_mask = skin_hue_mask & (S > 0.1) & (S < 0.7) & (V > 0.2) & (V < 0.95)
+        # Morphological cleanup: remove tiny specks and thin strips
+        # This prevents random green/orange blobs on walls, grass, background
+        kernel = np.ones((5, 5), np.uint8)
+        skin_mask_cleaned = cv2.morphologyEx(
+            skin_mask.astype(np.uint8),
+            cv2.MORPH_OPEN,  # Removes small isolated regions
+            kernel
+        ).astype(bool)
+        
+        # Use cleaned mask for skin correction
+        skin_mask = skin_mask_cleaned
         
         # Apply enhanced skin correction in Lab space for better chroma control
         if np.any(skin_mask):
@@ -273,37 +287,71 @@ class FusionModel(BaseModel):
             a_lab_skin[skin_mask] = a_s
             b_lab_skin[skin_mask] = b_s
             
+            # ---- SKIN HUE WARMTH CORRECTION ----
+            # Rotate hue angle in Lab space toward warm target (38 degrees)
+            # This fixes cold/blue skin tones while keeping chroma magnitude
+            a_s = a_lab_skin[skin_mask]
+            b_s = b_lab_skin[skin_mask]
+            
+            # Compute chroma magnitude
+            mag = np.sqrt(a_s**2 + b_s**2) + 1e-6
+            
+            # Current hue angle in Lab space
+            h = np.arctan2(b_s, a_s)
+            
+            # Target warm skin hue angle (~38 degrees = warm orange-tan)
+            target_h = np.deg2rad(38)
+            
+            # Interpolate hue toward warm angle (30% shift - gentle, not overpowering)
+            h_new = 0.7 * h + 0.3 * target_h
+            
+            # Recompose a,b using same magnitude, new hue
+            a_s_new = mag * np.cos(h_new)
+            b_s_new = mag * np.sin(h_new)
+            
+            # Assign back to full image
+            a_lab_skin[skin_mask] = a_s_new
+            b_lab_skin[skin_mask] = b_s_new
+            
             # Clamp brightness for skin - prevent over-brightening faces
             L_s = L_lab_skin[skin_mask]
             L_max = L_s.max()
             L_lab_skin[skin_mask] = np.minimum(L_s, 0.9 * L_max)  # Cap at 90% of max skin brightness
             
-            # Also apply hue correction in HSV for warm skin tones
-            target_skin_hue = 0.08  # Warm orange-tan
-            H_corrected = np.where(skin_mask, 0.75 * target_skin_hue + 0.25 * H, H)
-            H_corrected = np.clip(H_corrected, 0, 1)
-            
-            # Reconstruct Lab image with corrected ab channels
+            # Reconstruct Lab image with corrected ab channels (hue rotated toward warm)
             lab_corrected = np.stack([L_lab_skin, a_lab_skin, b_lab_skin], axis=-1)
             out_img_np = skcolor.lab2rgb(lab_corrected)
             out_img_np = np.clip(out_img_np, 0, 1)
-            
-            # Apply hue correction in final RGB
-            hsv_final = skcolor.rgb2hsv(out_img_np)
-            hsv_final[:, :, 0] = H_corrected  # Apply corrected hue
-            out_img_np = skcolor.hsv2rgb(hsv_final)
-            out_img_np = np.clip(out_img_np, 0, 1)
         
-        # Priority 2: Edge-aware smoothing using simple bilateral-like approach
-        # Apply light Gaussian blur to ab channels only (preserves edges via L channel)
-        try:
-            from scipy import ndimage
-            # Light smoothing: blend 90% original with 10% blurred
-            blurred = ndimage.gaussian_filter(out_img_np, sigma=0.5)
-            out_img_np = 0.9 * out_img_np + 0.1 * blurred
-            out_img_np = np.clip(out_img_np, 0, 1)
-        except:
-            pass  # If scipy not available, skip smoothing
+        # Priority 3: Bilateral filtering to remove isolated color noise
+        # Smooth out isolated crazy colors (e.g., single bright green pixel in neutral region)
+        # while preserving edges and big structures
+        img_uint8_final = (out_img_np * 255).astype(np.uint8)
+        lab_u8 = cv2.cvtColor(img_uint8_final, cv2.COLOR_RGB2LAB)
+        L, A, B = cv2.split(lab_u8)
+        
+        # Smooth only A,B channels (chroma) - keeps edges, removes speckle
+        A_smooth = cv2.bilateralFilter(A, d=5, sigmaColor=12, sigmaSpace=12)
+        B_smooth = cv2.bilateralFilter(B, d=5, sigmaColor=12, sigmaSpace=12)
+        
+        # Merge back
+        lab_smooth = cv2.merge([L, A_smooth, B_smooth])
+        img_smooth = cv2.cvtColor(lab_smooth, cv2.COLOR_LAB2RGB)
+        out_img_np = img_smooth.astype(np.float32) / 255.0
+        out_img_np = np.clip(out_img_np, 0, 1)
+        
+        # Optional: Global green bias correction (subtle shift away from green)
+        # Only apply if there's a noticeable global green cast
+        # Uncomment if needed:
+        # lab_u8_corr = cv2.cvtColor((out_img_np * 255).astype(np.uint8), cv2.COLOR_RGB2LAB)
+        # L_corr, A_corr, B_corr = cv2.split(lab_u8_corr.astype(np.int16))
+        # A_corr = A_corr - 2  # shift away from green (A<128 is greenish)
+        # B_corr = B_corr + 1  # slightly more yellow/red if needed
+        # A_corr = np.clip(A_corr, 0, 255).astype(np.uint8)
+        # B_corr = np.clip(B_corr, 0, 255).astype(np.uint8)
+        # lab_corr = cv2.merge([L_corr.astype(np.uint8), A_corr, B_corr])
+        # out_img_np = cv2.cvtColor(lab_corr, cv2.COLOR_LAB2RGB).astype(np.float32) / 255.0
+        # out_img_np = np.clip(out_img_np, 0, 1)
         
         # Save the image
         io.imsave(path, img_as_ubyte(out_img_np))
