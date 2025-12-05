@@ -40,6 +40,7 @@ class TestOptions(BaseOptions):
         parser.add_argument('--test_img_dir', type=str, default='example', help='testing images folder')
         parser.add_argument('--results_img_dir', type=str, default='results', help='save the results image folder')
         parser.add_argument('--name', type=str, default='test_fusion', help='name of the experiment. It decides where to store samples and models')
+        parser.add_argument('--enable_editing', action='store_true', help='enable interactive post-editing for color adjustments')
         parser.add_argument('--model', type=str, default='fusion',
                             help='chooses which model to use. cycle_gan, pix2pix, test')
         parser.add_argument('--display_freq', type=int, default=2000, help='frequency of showing training results on screen')
