@@ -6,6 +6,7 @@ import numpy as np
 import torch
 import torch.utils.data as Data
 import torchvision.transforms as transforms
+from PIL import Image
 
 from image_util import *
 

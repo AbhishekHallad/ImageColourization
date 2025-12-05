@@ -47,7 +47,7 @@ if __name__ == '__main__':
     for data_raw in tqdm(dataset_loader, dynamic_ncols=True):
         # Pure colorization: Use ONLY full-image model (netGComp) - NO bounding boxes, NO masks, NO fusion
         # This colorizes the entire image uniformly without any detector-based restrictions
-        data_raw['full_img'][0] = data_raw['full_img'][0].to(device)
+        data_raw['full_img'] = data_raw['full_img'].to(device)
         full_img_data = util.get_colorization_data(data_raw['full_img'], opt, ab_thresh=0, p=opt.sample_p)
         model.set_forward_without_box(full_img_data)
         model.save_current_imgs(join(save_img_path, data_raw['file_id'][0] + '.png'))
